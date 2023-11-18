@@ -51,17 +51,18 @@ def monitor_playing_song(sp, username):
     global last_song
     log.debug(f'Monitor Account')
     played_track = sp.current_user_playing_track()
-    track = played_track.get("item")
-    name = track["name"]
-    artist_names = ""
-    for artist in track["artists"]:
-        artist_names += artist["name"] + " "
-    explicit = ""
-    if track["explicit"]:
-        explicit = "XXX"
-    if not username in last_song or not last_song[username] == f'{name}-{artist_names}':
-        log.info(f'Playing song from {username}: {name} / {artist_names} | {explicit}')
-        last_song[username] = f'{name}-{artist_names}'
+    if played_track:
+        track = played_track.get("item")
+        name = track["name"]
+        artist_names = ""
+        for artist in track["artists"]:
+            artist_names += artist["name"] + " "
+        explicit = ""
+        if track["explicit"]:
+            explicit = "XXX"
+        if not username in last_song or not last_song[username] == f'{name}-{artist_names}':
+            log.info(f'Playing song from {username}: {name} / {artist_names} | {explicit}')
+            last_song[username] = f'{name}-{artist_names}'
 
 
 def main(args, history = False):
