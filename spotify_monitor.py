@@ -7,11 +7,14 @@ from mergedeep import merge, Strategy
 import schedule
 import time
 
-
-logging.basicConfig(format='%(asctime)s %(message)s', level=logging.WARNING)
+logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
 log = logging.getLogger()
 
 last_execution = None
+
+auth_cache = {}
+
+last_song = {}
 
 def get_all(sp, function, *arg):
     log.info("Call get_all with function: %s" % function)
@@ -27,6 +30,10 @@ def get_all(sp, function, *arg):
 def auth(account, config):
     """Handles the authentication for the various accounts
     """
+    global auth_cache
+    if account["Username"] in auth_cache:
+        return auth_cache[account["Username"]]
+
     handler = CacheFileHandler(username=account["Username"])
     sp = spotipy.Spotify(
         auth_manager=SpotifyOAuth(
@@ -35,50 +42,84 @@ def auth(account, config):
             redirect_uri=account.get("RedirectUrl"),
             cache_handler=handler,
             open_browser=config.get("OpenBrowser"),
-            scope="user-read-recently-played"))
+            scope="user-read-recently-played user-read-currently-playing"))
     log.info("Authenicated with user %s" % account["Username"])
-
+    auth_cache[account["Username"]] = sp
     return sp
 
-def main(args):
+def monitor_playing_song(sp, username):
+    global last_song
+    log.debug(f'Monitor Account')
+    played_track = sp.current_user_playing_track()
+    track = played_track.get("item")
+    name = track["name"]
+    artist_names = ""
+    for artist in track["artists"]:
+        artist_names += artist["name"] + " "
+    explicit = ""
+    if track["explicit"]:
+        explicit = "XXX"
+    if not username in last_song or not last_song[username] == f'{name}-{artist_names}':
+        log.info(f'Playing song from {username}: {name} / {artist_names} | {explicit}')
+        last_song[username] = f'{name}-{artist_names}'
+
+
+def main(args, history = False):
     global last_execution
     with open(args.config_file) as f:
         config = yaml.full_load(f)
     log.setLevel(config.get("LogLevel"))
+
+    # Check if there is a song played currently
     for account in config.get("accounts"):
         sp = auth(account, config)
-        tracks = get_all(sp, "current_user_recently_played", 50, last_execution)
-        log.debug(tracks)
-        for tr in tracks.get("items"):
-            played_at = tr["played_at"]
-            track = tr["track"]
-            name = track["name"]
-            artist_names = ""
-            for artist in track["artists"]:
-                artist_names += artist["name"] + " "
-            explicit = ""
-            if track["explicit"]:
-                explicit = "XXX"
-            log.info(f'Played from {account["Username"]} at {played_at}: {name} / {artist_names} | {explicit}')
-    last_execution = time.time_ns() - ( 5 * 60 * 1000 * 1000) 
+        cur_track = sp.current_user_playing_track()
+        if cur_track and cur_track.get("is_playing"):
+            if not schedule.get_jobs(tag=account["Username"]):
+                log.info(f'Account {account["Username"]} is currently playing. Scheduling monitor every {args.monitor_frequency} seconds')
+                job = schedule.every(args.monitor_frequency).seconds.do(monitor_playing_song, sp, account["Username"])
+                job.tags = {account["Username"]}
+        else:
+            jobs = schedule.get_jobs(tag=account["Username"])
+            for job in jobs:
+                schedule.cancel_job(job)
+                log.info(f'Account {account["Username"]} has stopped playing')
+
+    if history:
+    # Check history
+        for account in config.get("accounts"):
+            sp = auth(account, config)
+            tracks = get_all(sp, "current_user_recently_played", 50, last_execution)
+            log.debug(tracks)
+            for tr in tracks.get("items"):
+                played_at = tr["played_at"]
+                track = tr["track"]
+                name = track["name"]
+                artist_names = ""
+                for artist in track["artists"]:
+                    artist_names += artist["name"] + " "
+                explicit = ""
+                if track["explicit"]:
+                    explicit = "XXX"
+                log.info(f'Played from {account["Username"]} at {played_at}: {name} / {artist_names} | {explicit}')
+    last_execution = int(time.time()) - 60
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Spotify playlist sync')
     parser.add_argument('--config-file', "-c",
                         help='Config file (default config.yaml)',
                         default="config.yaml")
-    parser.add_argument('--daemon', "-d", action="store_true",
-                        default=False,
-                        help='Keep running and syncing')
-    parser.add_argument('--frequency',
+    parser.add_argument('--frequency', '-f',
+                        default=1,
+                        help='Frequency for the general check in minutes')
+    parser.add_argument('--monitor-frequency', '-m',
                         default=5,
-                        help='Sync frequency in minutes')
+                        help='Monitor frequency while playing in seconds')
     args = parser.parse_args()
 
-    main(args)
-    if args.daemon:
-        schedule.every(args.frequency).seconds.do(main, args=args)
-        log.info("Run every %s minutes from now" % args.frequency)
-        while True:
-            schedule.run_pending()
-            time.sleep(10)
+    main(args, True)
+    schedule.every(args.frequency).minutes.do(main, args=args)
+    log.info("Run every %s minutes from now" % args.frequency)
+    while True:
+        schedule.run_pending()
+        time.sleep(1)
